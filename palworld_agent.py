@@ -36,6 +36,13 @@ from typing import Any, Optional, Sequence
 
 from openrappter.agents.basic_agent import BasicAgent
 
+from rappter_plays_palworld.gameplay import (
+    Plan,
+    PlayLoop,
+    RestOracle,
+)
+from rappter_plays_palworld.inputs import IS_WINDOWS as IS_WINDOWS_HOST
+from rappter_plays_palworld.profiles import get_profile
 from rappter_plays_palworld.restapi import (
     PalworldApiError,
     PalworldAuthError,
@@ -73,6 +80,7 @@ DEFAULT_DECISION_TIMEOUT = 120.0
 MEMORY_TURNS = 6
 
 VALID_ACTIONS = (
+    "play",
     "start",
     "status",
     "watch",
@@ -228,6 +236,139 @@ class Brain:
         except Exception as error:  # noqa: BLE001 - a bad tick must not kill the loop
             return Decision(error=f"decision failed: {error}")
         return Decision.parse(_response_text(response))
+
+
+class VisionBrain(Brain):
+    """Decides from a screenshot, the way a player does.
+
+    This is the brain that actually plays. It receives the live frame as a PNG/
+    JPEG attachment and returns a :class:`Plan` of key presses and mouse moves.
+    The session carries no tools and no memory -- the model gets the frame, the
+    ground-truth text, and nothing else.
+    """
+
+    def decide(self, *, system: str, prompt: str, frame: Any) -> Plan:  # type: ignore[override]
+        try:
+            client = self._ensure_client()
+            response = client.complete(
+                system=system,
+                prompt=prompt,
+                attachments=[
+                    {
+                        "media_type": getattr(frame, "media_type", "image/jpeg"),
+                        "data": getattr(frame, "data", b""),
+                    }
+                ],
+                timeout=self.timeout,
+            )
+        except Exception as error:  # noqa: BLE001 - one bad turn must not end the run
+            return Plan(error=f"decision failed: {error}")
+        return Plan.parse(_response_text(response))
+
+
+class PlayRuntime:
+    """Runs the play loop on a background thread with durable state."""
+
+    def __init__(
+        self,
+        loop: PlayLoop,
+        *,
+        runtime_dir: Path = DEFAULT_RUNTIME_DIR,
+        turn_delay: float = 0.0,
+    ) -> None:
+        self.loop = loop
+        self.turn_delay = max(0.0, float(turn_delay))
+        self.runtime_dir = Path(runtime_dir).expanduser()
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        self.log_path = self.runtime_dir / "play.jsonl"
+
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._turns = 0
+        self._errors = 0
+        self._last_error = ""
+        self._last_summary = ""
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="palworld-play", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self, timeout: float = 20.0) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=timeout)
+        self._thread = None
+        # Releasing input on the way out is not optional: a half-executed plan
+        # would otherwise leave the character running.
+        self.loop.shutdown()
+
+    def _run(self) -> None:
+        LOGGER.info("play loop started (%s)", self.loop.profile.name)
+        try:
+            while not self._stop.is_set():
+                try:
+                    turn = self.loop.step()
+                except Exception as error:  # noqa: BLE001 - keep playing
+                    with self._lock:
+                        self._errors += 1
+                        self._last_error = str(error)
+                    LOGGER.warning("turn failed: %s", error)
+                    self._stop.wait(1.0)
+                    continue
+
+                with self._lock:
+                    self._turns += 1
+                    self._last_summary = turn.summary()
+                    if turn.error:
+                        self._errors += 1
+                        self._last_error = turn.error
+
+                self._record(turn)
+                if self.turn_delay:
+                    self._stop.wait(self.turn_delay)
+        finally:
+            self.loop.shutdown()
+            LOGGER.info("play loop stopped")
+
+    def _record(self, turn: Any) -> None:
+        entry = {
+            "turn": turn.index,
+            "observation": turn.plan.observation,
+            "reasoning": turn.plan.reasoning,
+            "performed": list(turn.performed),
+            "error": turn.error,
+            "seconds": round(turn.duration, 2),
+        }
+        try:
+            with self.log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry) + "\n")
+        except OSError as error:  # pragma: no cover - disk issues
+            LOGGER.warning("cannot write play log: %s", error)
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "running": self.running,
+                "game": self.loop.profile.name,
+                "turns": self._turns,
+                "errors": self._errors,
+                "last_error": self._last_error,
+                "last_turn": self._last_summary,
+                "dry_run": self.loop.dry_run,
+                "input_backend": self.loop.keyboard.backend.name,
+                "oracle": self.loop.oracle is not None,
+            }
 
 
 class WardenRuntime:
@@ -521,13 +662,26 @@ class PalworldAgent(BasicAgent):
                     },
                     "dry_run": {
                         "type": "boolean",
-                        "description": "Decide but never broadcast",
+                        "description": "Decide but send no input and broadcast nothing",
+                    },
+                    "game": {
+                        "type": "string",
+                        "description": "Game profile for play (default palworld)",
+                    },
+                    "player_name": {
+                        "type": "string",
+                        "description": "In-game character name, anchors ground truth",
+                    },
+                    "turn_delay": {
+                        "type": "number",
+                        "description": "Extra seconds to pause between play turns",
                     },
                 },
                 "required": ["action"],
             },
         }
         self._runtime: Optional[WardenRuntime] = None
+        self._play_runtime: Optional[PlayRuntime] = None
         super().__init__(name=self.name, metadata=self.metadata)
 
     # ---- helpers ---------------------------------------------------------
@@ -580,6 +734,8 @@ class PalworldAgent(BasicAgent):
             return f"Error: {error}"
 
     def _dispatch(self, action: str, **kwargs: Any) -> str:
+        if action == "play":
+            return self._play(**kwargs)
         if action == "start":
             return self._start(**kwargs)
         if action == "stop":
@@ -655,6 +811,74 @@ class PalworldAgent(BasicAgent):
 
     # ---- lifecycle actions ----------------------------------------------
 
+    def _play(self, **kwargs: Any) -> str:
+        """Play the game the way a person does: screen in, keystrokes out."""
+        if self._play_runtime is not None and self._play_runtime.running:
+            return "Already playing.\n" + self._status()
+
+        profile = get_profile(str(kwargs.get("game") or "palworld"))
+
+        # The oracle is optional. Without credentials the agent still plays --
+        # it just reasons from pixels alone, with no ground-truth numbers.
+        oracle = None
+        try:
+            client = self._build_client(**kwargs)
+            if client.reachable():
+                oracle = RestOracle(client, str(kwargs.get("player_name") or ""))
+        except (RuntimeError, ValueError, PalworldApiError):
+            oracle = None
+
+        loop = PlayLoop(
+            profile,
+            brain=VisionBrain(
+                model=str(kwargs.get("model") or DEFAULT_MODEL),
+                reasoning_effort=str(
+                    kwargs.get("reasoning_effort") or DEFAULT_REASONING_EFFORT
+                ),
+            ),
+            oracle=oracle,
+            dry_run=bool(kwargs.get("dry_run")),
+        )
+
+        # Fail loudly here rather than after the loop is already running: a
+        # missing game window is the single most common setup mistake.
+        try:
+            rect = loop.capture.locate()
+        except Exception as error:  # noqa: BLE001 - surfaced to the user verbatim
+            loop.shutdown()
+            return (
+                f"Cannot capture the game: {error}\n"
+                f"Make sure {profile.name} is running and visible on this desktop."
+            )
+
+        self._play_runtime = PlayRuntime(
+            loop, turn_delay=float(kwargs.get("turn_delay") or 0.0)
+        )
+        self._play_runtime.start()
+
+        backend = loop.keyboard.backend
+        lines = [
+            f"Playing {profile.name}.",
+            f"  window   {rect.width}x{rect.height} at ({rect.left},{rect.top})",
+            f"  input    {backend.name}"
+            + (
+                ""
+                if backend.available
+                else " (UNAVAILABLE -- no input will reach the game)"
+            ),
+            f"  oracle   {'connected' if oracle else 'none (pixels only)'}",
+        ]
+        if loop.dry_run:
+            lines.append("  mode     dry run (decides but sends no input)")
+        if not IS_WINDOWS_HOST:
+            lines.append("")
+            lines.append(
+                "WARNING: this is not Windows. The Palworld client is "
+                "Windows-only and synthetic input cannot reach it from here. "
+                "Run the agent on the machine hosting the game."
+            )
+        return "\n".join(lines)
+
     def _start(self, **kwargs: Any) -> str:
         if self._runtime is not None and self._runtime.running:
             return "The warden is already running.\n" + self._status()
@@ -689,14 +913,42 @@ class PalworldAgent(BasicAgent):
         )
 
     def _stop_warden(self) -> str:
-        if self._runtime is None or not self._runtime.running:
-            return "The warden is not running."
-        self._runtime.stop()
-        return "Warden stopped."
+        stopped = []
+        if self._play_runtime is not None and self._play_runtime.running:
+            self._play_runtime.stop()
+            stopped.append("play loop")
+        if self._runtime is not None and self._runtime.running:
+            self._runtime.stop()
+            stopped.append("warden")
+        if not stopped:
+            return "Nothing is running."
+        return "Stopped: " + ", ".join(stopped) + "."
 
     def _status(self) -> str:
+        sections: list[str] = []
+
+        if self._play_runtime is not None:
+            play = self._play_runtime.status()
+            lines = [
+                f"playing     {play['game']} "
+                f"({'running' if play['running'] else 'stopped'})",
+                f"turns       {play['turns']} ({play['errors']} errors)",
+                f"input       {play['input_backend']}",
+                f"oracle      {'connected' if play['oracle'] else 'pixels only'}",
+            ]
+            if play["last_turn"]:
+                lines.append(f"last turn   {play['last_turn']}")
+            if play["last_error"]:
+                lines.append(f"last error  {play['last_error']}")
+            sections.append("\n".join(lines))
+
         if self._runtime is None:
-            return "The warden has not been started. Use action='start'."
+            if sections:
+                return "\n\n".join(sections)
+            return (
+                "Nothing is running. Use action='play' to play the game, "
+                "or action='start' for the server warden."
+            )
         state = self._runtime.status()
         lines = [
             f"warden      {'running' if state['running'] else 'stopped'}",
@@ -719,7 +971,8 @@ class PalworldAgent(BasicAgent):
             f"actuator    {state['actuator']} "
             f"({'available' if state['actuator_available'] else 'none installed'})"
         )
-        return "\n".join(lines)
+        sections.append("\n".join(lines))
+        return "\n\n".join(sections)
 
     def _watch(self, **kwargs: Any) -> str:
         runtime = self._require_runtime()

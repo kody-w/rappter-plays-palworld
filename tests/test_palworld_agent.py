@@ -271,10 +271,19 @@ class TestAgentContract:
         assert "Unknown action" in result
 
     def test_status_before_start(self):
-        assert "not been started" in PalworldAgent().perform(action="status")
+        # Idle status points at both modes, so a new user learns 'play' exists.
+        status = PalworldAgent().perform(action="status")
+        assert "Nothing is running" in status
+        assert "play" in status
 
     def test_stop_before_start(self):
-        assert "not running" in PalworldAgent().perform(action="stop")
+        assert "Nothing is running" in PalworldAgent().perform(action="stop")
+
+    def test_play_is_a_valid_action(self):
+        assert (
+            "play"
+            in PalworldAgent().metadata["parameters"]["properties"]["action"]["enum"]
+        )
 
     def test_missing_password_is_a_clear_error(self, monkeypatch):
         monkeypatch.delenv("PALWORLD_ADMIN_PASSWORD", raising=False)
