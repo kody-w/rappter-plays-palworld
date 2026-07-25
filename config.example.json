@@ -1,0 +1,15 @@
+{
+  "host": "192.168.1.50",
+  "rest_port": 8212,
+  "game_port": 8211,
+  "runtime_dir": "~/.openrappter/palworld",
+  "poll_seconds": 10,
+  "actor_limit": 40,
+  "model": "gpt-5.6-sol",
+  "reasoning_effort": "medium",
+  "decision_timeout": 120,
+  "dry_run": false,
+  "server_name": "RAPPter Plays Palworld",
+  "max_players": 32,
+  "public_lobby": false
+}

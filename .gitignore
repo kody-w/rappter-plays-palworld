@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+.venv-dev/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime state
+*.log
+events.jsonl
+state.json
+
+# Local configuration -- never commit AdminPassword
+config.json
+.env
+*.ini
+!server/*.example.ini
+
+# Server payload (never vendored)
+PalServer/
+steamcmd/
+Saved/
+
+# OS
+.DS_Store

@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=75,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rappter-plays-palworld"
+version = "0.1.0"
+description = "An OpenRappter agent that inhabits a self-hosted Palworld dedicated server via its official REST API"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Kody W" }]
+keywords = ["openrappter", "github-copilot", "palworld", "agent", "game-server"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.optional-dependencies]
+runtime = [
+  "github-copilot-sdk>=1.0.6,<2",
+]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<8",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+rappter-plays-palworld = "rappter_plays_palworld.cli:main"
+rappter-register-palworld = "rappter_plays_palworld.install_agent:main"
+
+[project.urls]
+Homepage = "https://github.com/kody-w/rappter-plays-palworld"
+Issues = "https://github.com/kody-w/rappter-plays-palworld/issues"
+Source = "https://github.com/kody-w/rappter-plays-palworld"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+extend-exclude = [".venv", ".venv-dev"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "S"]
+ignore = [
+  "S101",
+  "S104",
+  "S110",
+  "S311",
+  "S603",
+  "S607",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S"]
