@@ -1,5 +1,9 @@
 # RAPPter Plays Palworld
 
+<!-- rapp1:network-header:start -->
+[![RAPP/1](https://kody-w.github.io/rapp-hive-public/portfolio/badges/rappter-plays-palworld.svg)](https://github.com/kody-w/rapp-hive-public/blob/main/portfolio/repos/rappter-plays-palworld.md) · **New to RAPP?** [Start here: get your Brainstem →](https://github.com/kody-w/rapp-installer#start-here)
+<!-- rapp1:network-header:end -->
+
 An autonomous agent that plays **Palworld through the user interface** — it
 looks at the screen, decides, and presses keys, exactly like a person. No game
 API, no console commands, no scripted macros.
