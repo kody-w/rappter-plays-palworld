@@ -1,3 +1,7 @@
+<!-- retired-notice:start -->
+> **Retired experiment, kept for reference.** The living project is [kody-w/openrappter](https://github.com/kody-w/openrappter).
+<!-- retired-notice:end -->
+
 # RAPPter Plays Palworld
 
 <!-- rapp1:network-header:start -->
